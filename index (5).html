@@ -1,0 +1,1199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandbox Yard (WebXR)</title>
+<style>
+  :root{
+    --bg:#14160f; --panel:rgba(20,22,16,.94); --line:#3b4132; --ink:#ebe8da; --dim:#a29f8e;
+    --blood:#b3261e;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#0c0d09;color:var(--ink);font-family:"Segoe UI",system-ui,-apple-system,sans-serif;overflow:hidden}
+  canvas{display:block}
+  #menu{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(8,9,6,.55);z-index:5;padding:16px;overflow:auto}
+  #menu.hidden{display:none}
+  .panel{width:min(560px,100%);background:var(--panel);border:1px solid var(--line);padding:28px 30px 24px;border-radius:6px}
+  h1{margin:0 0 4px;font-size:34px;font-weight:800;letter-spacing:-.02em}
+  h2{margin:22px 0 8px;font-size:15px;font-weight:700;color:var(--dim)}
+  p{margin:0}
+  .sub{color:var(--dim);font-size:15px}
+  #levels{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+  #levels button{padding:10px 4px;background:#20241a;color:var(--ink);border:1px solid var(--line);border-radius:4px;font:inherit;font-weight:600;cursor:pointer}
+  #levels button:disabled{opacity:.35;cursor:not-allowed}
+  #levels button.on{color:#fff;border-color:transparent}
+  #levelDesc{margin-top:10px;color:var(--dim);font-size:14px;min-height:20px}
+  .check{display:flex;gap:10px;align-items:flex-start;margin-top:12px;font-size:14px;color:var(--ink);line-height:1.35}
+  .check input{margin-top:3px;accent-color:var(--blood)}
+  #modelStatus{font-size:14px;color:var(--dim)}
+  #filePick{display:inline-block;margin-top:8px;padding:8px 12px;border:1px dashed var(--dim);border-radius:4px;cursor:pointer;font-size:14px}
+  #filePick input{display:none}
+  .actions{display:flex;gap:10px;align-items:center;margin-top:24px;flex-wrap:wrap}
+  .actions>button,#vrSlot button{
+    position:static !important;left:auto !important;bottom:auto !important;width:auto !important;
+    padding:12px 18px !important;border:0 !important;border-radius:4px !important;font:inherit !important;font-weight:700 !important;
+    cursor:pointer;color:#fff !important;background:var(--blood) !important;opacity:1 !important;
+  }
+  #vrSlot button{background:#2b3a52 !important}
+  .help{margin-top:18px;font-size:13px;line-height:1.5;color:var(--dim)}
+  #hud{position:fixed;top:12px;left:14px;z-index:3;font-size:14px;line-height:1.4;text-shadow:0 1px 3px #000;pointer-events:none}
+  #cross{position:fixed;left:50%;top:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border:2px solid rgba(255,255,255,.8);border-radius:50%;z-index:3;pointer-events:none;box-shadow:0 0 3px #000}
+  #toast{position:fixed;left:50%;bottom:60px;transform:translateX(-50%);background:rgba(0,0,0,.8);padding:10px 16px;border-radius:4px;z-index:6;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
+  #toast.show{opacity:1}
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+
+<div id="hud"></div>
+<div id="cross"></div>
+<div id="toast"></div>
+
+<div id="menu">
+  <div class="panel">
+    <h1>Sandbox Yard</h1>
+    <p class="sub">Shoot, throw grenades and tear up dummies. You play as the soldier.</p>
+
+    <h2>Gore level</h2>
+    <div id="levels"></div>
+    <p id="levelDesc"></p>
+    <label class="check"><input type="checkbox" id="adultChk"><span>I’m 18 or older and I want graphic gore (levels 4 and 5).</span></label>
+
+    <h2>Player model</h2>
+    <p id="modelStatus">Waiting to load…</p>
+    <label id="filePick" hidden>Choose soldier_full_tactical_gear.glb<input type="file" id="fileIn" accept=".glb,.gltf"></label>
+
+    <div class="actions">
+      <button id="playBtn">Play on desktop</button>
+      <span id="vrSlot"></span>
+    </div>
+
+    <p class="help">
+      <b>Desktop:</b> WASD move, Shift run, mouse aim, click fire, G grenade, R spawn dummy, C clean up, 1–5 gore level, V first or third person, Esc pause.<br>
+      <b>VR:</b> left stick move, right stick turn, right trigger fire, right grip grenade, A or X spawn dummy, B clean up, Y gore level.
+    </p>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+/* =====================================================================
+   CONFIG
+   ===================================================================== */
+const MODEL_URL        = 'soldier_full_tactical_gear.glb'; // put the .glb next to this file
+const MODEL_YAW_OFFSET = Math.PI;   // soldier faces +Z in the file. If he walks backwards, set to 0.
+const HEAD_BONE_HEIGHT = 1.52;      // metres from floor to head bone (sets the soldier's size)
+const HIDE_IN_FPV      = /HeadMasked|Helmet|SunGlusses|Mark_Eye/i; // meshes hidden when you look out of his eyes
+
+const GORE_LEVELS = [
+  { name:'Off',      blurb:'Cartoon puffs and confetti. No blood.',                      cartoon:true,  particles:14,  decalChance:0,   maxDecals:0,   wounds:false, dismember:false, gibs:0,  persist:3,   pools:false, trail:false, slowmo:false },
+  { name:'Mild',     blurb:'Small blood spurts and a few splats. Bodies fade quickly.',  cartoon:false, particles:16,  decalChance:.35, maxDecals:40,  wounds:false, dismember:false, gibs:0,  persist:8,   pools:false, trail:false, slowmo:false },
+  { name:'Moderate', blurb:'Bigger splatter, lasting decals, wounds on bodies, chunks.', cartoon:false, particles:36,  decalChance:.7,  maxDecals:140, wounds:true,  dismember:false, gibs:4,  persist:30,  pools:false, trail:false, slowmo:false },
+  { name:'Heavy',    blurb:'Dismemberment, gibs, blood pools and bleeding stumps.',      cartoon:false, particles:70,  decalChance:1,   maxDecals:260, wounds:true,  dismember:true,  gibs:8,  persist:90,  pools:true,  trail:true,  slowmo:false },
+  { name:'Extreme',  blurb:'Maximum gibs and fluid, bodies stay, slow motion on kills.', cartoon:false, particles:120, decalChance:1,   maxDecals:480, wounds:true,  dismember:true,  gibs:16, persist:600, pools:true,  trail:true,  slowmo:true  },
+];
+const LEVEL_COLORS = ['#4d6b4a','#7a7a2e','#a8671f','#b3361e','#7d0f0f'];
+
+const MAX_DECALS = 500, P_MAX = 1000, GIB_MAX = 160, POOL_MAX = 24, MAX_ENEMIES = 14;
+
+/* =====================================================================
+   HELPERS
+   ===================================================================== */
+const $ = s => document.querySelector(s);
+const V3 = THREE.Vector3;
+const UP = new V3(0,1,0), ZAXIS = new V3(0,0,1);
+const tmpV = new V3(), tmpV2 = new V3(), tmpV3 = new V3(), P0 = new V3();
+const tmpQ = new THREE.Quaternion(), tmpQ2 = new THREE.Quaternion();
+const dummy = new THREE.Object3D();
+const col = new THREE.Color();
+const rand = (a,b) => a + Math.random()*(b-a);
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const pick = arr => arr[(Math.random()*arr.length)|0];
+const angDiff = (a,b) => ((b - a + Math.PI) % (Math.PI*2) + Math.PI*2) % (Math.PI*2) - Math.PI;
+
+const PAL = {
+  blood:   [0x5e0808,0x7a0b0b,0x9c1212,0xb81a1a],
+  decal:   [0x4a0606,0x650909,0x7d0c0c,0x910f0f],
+  cartoon: [0xffe14d,0xff7ad9,0x6df0ff,0xffffff,0x9dff6b],
+  dust:    [0x8d8a80,0xa8a59b,0x6e6b62],
+  smoke:   [0x333333,0x555555,0x777777],
+  fire:    [0xffb347,0xff6a00,0xffd93d],
+};
+const GIB_COLORS = [0x7a0b0b,0x9c1a1a,0xb04a4a,0xc98a8a,0xe6dccb];
+
+/* =====================================================================
+   STATE
+   ===================================================================== */
+let goreIndex = 2, gore = GORE_LEVELS[goreIndex], adultOk = false;
+let started = false, locked = false, thirdPerson = true;
+let yaw = 0, pitch = 0, bodyYaw = 0, bodySquat = 1;
+let simTime = 0, realTime = 0, timeScale = 1, slowTimer = 0, kills = 0, lastShot = 0, mouseDown = false;
+const keys = {};
+
+try {
+  const s = JSON.parse(localStorage.getItem('yard-settings') || '{}');
+  if (s.adult) adultOk = true;
+  if (Number.isInteger(s.gore) && s.gore >= 0 && s.gore < 5 && (s.gore < 3 || adultOk)) goreIndex = s.gore;
+  gore = GORE_LEVELS[goreIndex];
+} catch (e) {}
+
+/* =====================================================================
+   RENDERER, SCENE, RIG
+   ===================================================================== */
+const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.xr.enabled = true;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xa7b3b4);
+scene.fog = new THREE.Fog(0xa7b3b4, 28, 75);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.05, 150);
+const rig = new THREE.Group();            // player position and yaw
+const pitchPivot = new THREE.Group();     // desktop camera pitch pivot
+pitchPivot.position.y = 1.58;
+rig.add(pitchPivot); pitchPivot.add(camera);
+rig.position.set(0, 0, 9);
+scene.add(rig);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+scene.add(new THREE.HemisphereLight(0xe3edf2, 0x514b3c, 0.95));
+const sun = new THREE.DirectionalLight(0xfff0d8, 2.0);
+sun.position.set(9, 16, 7);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1536, 1536);
+Object.assign(sun.shadow.camera, { left:-24, right:24, top:24, bottom:-24, near:1, far:50 });
+sun.shadow.bias = -0.0004;
+scene.add(sun);
+
+/* ---------- arena ---------- */
+function makeFloorTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 512;
+  const g = c.getContext('2d');
+  g.fillStyle = '#76766c'; g.fillRect(0,0,512,512);
+  for (let i=0;i<7000;i++){ const v = 90 + Math.random()*70|0; g.fillStyle = `rgba(${v},${v},${v-6},.35)`; g.fillRect(Math.random()*512, Math.random()*512, 2, 2); }
+  g.strokeStyle = 'rgba(30,30,26,.55)'; g.lineWidth = 3;
+  g.strokeRect(1.5,1.5,509,509);
+  g.strokeStyle = 'rgba(30,30,26,.18)'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(256,0); g.lineTo(256,512); g.moveTo(0,256); g.lineTo(512,256); g.stroke();
+  const t = new THREE.CanvasTexture(g.canvas);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(12,12);
+  t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  return t;
+}
+const surfaces = [];      // anything bullets and blood can hit
+const colliders = [];     // xz boxes the player can’t walk through
+
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(60,60), new THREE.MeshStandardMaterial({ map:makeFloorTexture(), roughness:.95 }));
+floor.rotation.x = -Math.PI/2; floor.receiveShadow = true;
+scene.add(floor); surfaces.push(floor);
+
+function addBox(x, y, z, w, h, d, color, collide = true) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshStandardMaterial({ color, roughness:.9 }));
+  m.position.set(x,y,z); m.castShadow = m.receiveShadow = true;
+  scene.add(m); surfaces.push(m);
+  if (collide) colliders.push({ minX:x-w/2, maxX:x+w/2, minZ:z-d/2, maxZ:z+d/2 });
+  return m;
+}
+addBox(0, 2, -20.5, 41, 4, 1, 0x8a8f86);
+addBox(0, 2,  20.5, 41, 4, 1, 0x8a8f86);
+addBox(-20.5, 2, 0, 1, 4, 41, 0x858a81);
+addBox( 20.5, 2, 0, 1, 4, 41, 0x858a81);
+addBox(-6, .6, -6, 1.2, 1.2, 1.2, 0x6f5a3a);
+addBox(-4.7, .6, -6.3, 1.2, 1.2, 1.2, 0x6a5536);
+addBox(-5.4, 1.8, -6.1, 1.2, 1.2, 1.2, 0x75603f);
+addBox(7, .75, -3, 1.5, 1.5, 1.5, 0x4d5a45);
+addBox(10, 1, -8, 6, 2, .5, 0x9a998d);
+addBox(-10, 1, 4, .5, 2, 6, 0x9a998d);
+addBox(2, .5, -11, 3, 1, 1, 0x6b6c63);
+addBox(12, .6, 6, 1.2, 1.2, 1.2, 0x6f5a3a);
+for (const [x,z] of [[-12,-12],[14,-14],[-14,10]]) {
+  const b = new THREE.Mesh(new THREE.CylinderGeometry(.35,.35,1.0,14), new THREE.MeshStandardMaterial({ color:0x8a2d22, roughness:.6, metalness:.3 }));
+  b.position.set(x,.5,z); b.castShadow = b.receiveShadow = true; scene.add(b); surfaces.push(b);
+  colliders.push({ minX:x-.35, maxX:x+.35, minZ:z-.35, maxZ:z+.35 });
+}
+
+function collide(p, r = .35) {
+  p.x = clamp(p.x, -19.3, 19.3); p.z = clamp(p.z, -19.3, 19.3);
+  for (const c of colliders) {
+    if (p.x > c.minX-r && p.x < c.maxX+r && p.z > c.minZ-r && p.z < c.maxZ+r) {
+      const dl = p.x-(c.minX-r), dr = (c.maxX+r)-p.x, db = p.z-(c.minZ-r), df = (c.maxZ+r)-p.z;
+      const m = Math.min(dl,dr,db,df);
+      if (m === dl) p.x = c.minX-r; else if (m === dr) p.x = c.maxX+r;
+      else if (m === db) p.z = c.minZ-r; else p.z = c.maxZ+r;
+    }
+  }
+}
+
+/* =====================================================================
+   AUDIO (tiny synth, no files needed)
+   ===================================================================== */
+let actx = null;
+function initAudio() {
+  try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch (e) {}
+}
+function noise(dur, freq, vol, type = 'lowpass') {
+  if (!actx) return;
+  const n = Math.floor(actx.sampleRate * dur);
+  const buf = actx.createBuffer(1, n, actx.sampleRate), d = buf.getChannelData(0);
+  for (let i=0;i<n;i++) d[i] = (Math.random()*2-1) * Math.pow(1 - i/n, 2);
+  const s = actx.createBufferSource(); s.buffer = buf;
+  const f = actx.createBiquadFilter(); f.type = type; f.frequency.value = freq;
+  const g = actx.createGain(); g.gain.value = vol;
+  s.connect(f); f.connect(g); g.connect(actx.destination); s.start();
+}
+let lastSplat = 0;
+const sfx = {
+  shot:  () => noise(.12, 2200, .22, 'bandpass'),
+  boom:  () => { noise(.9, 260, .7); noise(.3, 1200, .3, 'bandpass'); },
+  splat: () => { if (realTime - lastSplat > .07) { lastSplat = realTime; noise(.1, 500, .35); } },
+};
+
+/* =====================================================================
+   BLOOD SYSTEMS: particles, decals, gibs, pools
+   ===================================================================== */
+/* ---- particles (instanced spheres, pooled) ---- */
+const pMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1,5,4), new THREE.MeshBasicMaterial(), P_MAX);
+pMesh.frustumCulled = false; scene.add(pMesh);
+const pPos = new Float32Array(P_MAX*3), pVel = new Float32Array(P_MAX*3);
+const pLife = new Float32Array(P_MAX), pSize = new Float32Array(P_MAX), pGrav = new Float32Array(P_MAX);
+const pKind = new Uint8Array(P_MAX), pOn = new Uint8Array(P_MAX);
+let pHead = 0;
+dummy.scale.set(0,0,0); dummy.updateMatrix();
+for (let i=0;i<P_MAX;i++){ pMesh.setMatrixAt(i, dummy.matrix); pMesh.setColorAt(i, col.setHex(0xffffff)); }
+
+function spawnParticles(p, n, d, count, kind, speed = 1, size = 1) {
+  const pal = PAL[kind];
+  const grav = kind === 'smoke' ? -0.6 : (kind === 'fire' ? 1 : 9.8);
+  for (let c=0;c<count;c++){
+    const i = pHead++ % P_MAX, o = i*3;
+    pPos[o]=p.x; pPos[o+1]=p.y; pPos[o+2]=p.z;
+    const a = rand(.4,3)*speed, b = rand(0,3.5)*speed;
+    pVel[o]   = n.x*a + d.x*b + rand(-1.2,1.2)*speed;
+    pVel[o+1] = n.y*a + d.y*b + rand(-.2,1.8)*speed;
+    pVel[o+2] = n.z*a + d.z*b + rand(-1.2,1.2)*speed;
+    pLife[i] = rand(.5,1.3); pSize[i] = rand(.014,.04)*size*(kind==='smoke'?4:1);
+    pGrav[i] = grav; pKind[i] = kind === 'blood' ? 1 : 0; pOn[i] = 1;
+    pMesh.setColorAt(i, col.setHex(pick(pal)));
+  }
+  pMesh.instanceColor.needsUpdate = true;
+}
+function spawnBlood(p, n, d, count, speed = 1, size = 1) {
+  spawnParticles(p, n, d, count, gore.cartoon ? 'cartoon' : 'blood', speed, gore.cartoon ? size*1.6 : size);
+}
+
+/* ---- decals (instanced quads, ring buffer) ---- */
+function makeSplatTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d'); g.fillStyle = g.strokeStyle = '#fff';
+  g.beginPath(); g.arc(64,64,rand(14,22),0,7); g.fill();
+  for (let i=0;i<16;i++){
+    const a = Math.random()*6.283, d = rand(18,50), r = rand(2,9);
+    g.beginPath(); g.arc(64+Math.cos(a)*d, 64+Math.sin(a)*d, r, 0, 7); g.fill();
+    g.lineWidth = r*.8; g.beginPath(); g.moveTo(64,64); g.lineTo(64+Math.cos(a)*d*.8, 64+Math.sin(a)*d*.8); g.stroke();
+  }
+  return new THREE.CanvasTexture(c);
+}
+const decalMesh = new THREE.InstancedMesh(
+  new THREE.PlaneGeometry(1,1),
+  new THREE.MeshBasicMaterial({ map:makeSplatTexture(), transparent:true, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2 }),
+  MAX_DECALS);
+decalMesh.frustumCulled = false; scene.add(decalMesh);
+for (let i=0;i<MAX_DECALS;i++){ decalMesh.setMatrixAt(i, dummy.matrix); decalMesh.setColorAt(i, col.setHex(0xffffff)); }
+let decalIdx = 0;
+
+function spawnDecal(point, normal, size) {
+  if (!gore.maxDecals) return;
+  const i = decalIdx++ % gore.maxDecals;
+  tmpQ.setFromUnitVectors(ZAXIS, normal);
+  tmpQ2.setFromAxisAngle(ZAXIS, Math.random()*6.283);
+  dummy.quaternion.copy(tmpQ).multiply(tmpQ2);
+  dummy.position.copy(point).addScaledVector(normal, .004 + (i%7)*.0006);
+  dummy.scale.set(size*rand(.8,1.25), size*rand(.8,1.25), 1);
+  dummy.updateMatrix();
+  decalMesh.setMatrixAt(i, dummy.matrix);
+  decalMesh.setColorAt(i, col.setHex(pick(PAL.decal)).multiplyScalar(rand(.8,1.15)));
+  decalMesh.instanceMatrix.needsUpdate = true; decalMesh.instanceColor.needsUpdate = true;
+  sfx.splat();
+}
+function hideDecalsAbove(max) {
+  dummy.scale.set(0,0,0); dummy.updateMatrix();
+  for (let i=max;i<MAX_DECALS;i++) decalMesh.setMatrixAt(i, dummy.matrix);
+  decalMesh.instanceMatrix.needsUpdate = true;
+}
+
+/* ---- ray helpers: splatter blood onto nearby surfaces ---- */
+const ray = new THREE.Raycaster();
+const nrm = new V3();
+function surfaceHit(origin, dir, far) {
+  ray.set(origin, dir); ray.far = far;
+  const h = ray.intersectObjects(surfaces, false)[0];
+  if (!h) return null;
+  nrm.copy(h.face.normal).transformDirection(h.object.matrixWorld);
+  return { point:h.point, normal:nrm, distance:h.distance };
+}
+function splatter(origin, count, radius) {
+  if (!gore.maxDecals) return;
+  const o = tmpV3.copy(origin); o.y = Math.max(o.y, .25);
+  for (let i=0;i<count;i++){
+    tmpV2.set(rand(-1,1), rand(-.9,.6), rand(-1,1)).normalize();
+    const h = surfaceHit(o, tmpV2, radius);
+    if (h) spawnDecal(h.point, h.normal, clamp(rand(.25,.7) * (1.2 - h.distance/radius), .12, .8));
+  }
+}
+
+/* ---- gibs (instanced chunks with simple physics) ---- */
+const gibMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshStandardMaterial({ roughness:.45 }), GIB_MAX);
+gibMesh.frustumCulled = false; gibMesh.castShadow = true; scene.add(gibMesh);
+const gibData = new Array(GIB_MAX).fill(null);
+for (let i=0;i<GIB_MAX;i++){ gibMesh.setMatrixAt(i, dummy.matrix); gibMesh.setColorAt(i, col.setHex(0xffffff)); }
+let gibHead = 0;
+
+function spawnGibs(p, dir, n, power = 1) {
+  if (!gore.gibs) return;
+  for (let k=0;k<n;k++){
+    const i = gibHead++ % GIB_MAX;
+    gibData[i] = {
+      pos: p.clone().add(tmpV.set(rand(-.1,.1), rand(-.1,.1), rand(-.1,.1))),
+      vel: new V3(rand(-1.5,1.5), rand(1,3.5), rand(-1.5,1.5)).addScaledVector(dir, rand(1,3)).multiplyScalar(power*rand(.7,1.6)),
+      rot: new V3(rand(0,6), rand(0,6), rand(0,6)),
+      ang: new V3(rand(-12,12), rand(-12,12), rand(-12,12)),
+      size: new V3(rand(.03,.1), rand(.03,.09), rand(.04,.16)),
+      life: gore.persist, asleep: false,
+    };
+    gibMesh.setColorAt(i, col.setHex(pick(GIB_COLORS)));
+  }
+  gibMesh.instanceColor.needsUpdate = true;
+}
+function updateGibs(dt) {
+  let any = false;
+  for (let i=0;i<GIB_MAX;i++){
+    const g = gibData[i]; if (!g) continue;
+    any = true;
+    if (!g.asleep) {
+      g.vel.y -= 9.8*dt;
+      g.pos.addScaledVector(g.vel, dt);
+      g.rot.addScaledVector(g.ang, dt);
+      const ground = g.size.y*.5;
+      if (g.pos.y < ground) {
+        g.pos.y = ground;
+        if (g.vel.y < -2) {
+          if (Math.random() < .5) spawnDecal(tmpV.set(g.pos.x, 0, g.pos.z), UP, rand(.15,.35));
+          g.vel.y *= -.3; g.vel.x *= .6; g.vel.z *= .6; g.ang.multiplyScalar(.5);
+        } else {
+          g.vel.y = 0; g.vel.x *= .8; g.vel.z *= .8; g.ang.multiplyScalar(.7);
+          if (g.vel.lengthSq() < .02) g.asleep = true;
+        }
+      }
+      if (Math.abs(g.pos.x) > 19.6) { g.pos.x = Math.sign(g.pos.x)*19.6; g.vel.x *= -.4; }
+      if (Math.abs(g.pos.z) > 19.6) { g.pos.z = Math.sign(g.pos.z)*19.6; g.vel.z *= -.4; }
+    }
+    g.life -= dt;
+    if (g.life <= 0) { gibData[i] = null; dummy.scale.set(0,0,0); }
+    else dummy.scale.copy(g.size).multiplyScalar(Math.min(1, g.life));
+    dummy.position.copy(g.pos); dummy.rotation.set(g.rot.x, g.rot.y, g.rot.z); dummy.updateMatrix();
+    gibMesh.setMatrixAt(i, dummy.matrix);
+  }
+  if (any) gibMesh.instanceMatrix.needsUpdate = true;
+}
+
+/* ---- blood pools ---- */
+function makePoolTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const ph = Math.random()*6;
+  g.beginPath();
+  for (let a=0;a<=6.3;a+=.1){
+    const r = 46 + Math.sin(a*3+ph)*7 + Math.sin(a*5+ph*2)*4 + rand(-1.5,1.5);
+    const x = 64+Math.cos(a)*r, y = 64+Math.sin(a)*r;
+    if (a===0) g.moveTo(x,y); else g.lineTo(x,y);
+  }
+  g.closePath();
+  const gr = g.createRadialGradient(64,64,10,64,64,52);
+  gr.addColorStop(0,'rgba(255,255,255,1)'); gr.addColorStop(1,'rgba(255,255,255,.75)');
+  g.fillStyle = gr; g.fill();
+  return new THREE.CanvasTexture(c);
+}
+const poolGeo = new THREE.PlaneGeometry(1,1); poolGeo.rotateX(-Math.PI/2);
+const poolMat = new THREE.MeshBasicMaterial({ map:makePoolTexture(), color:0x600808, transparent:true, opacity:.93, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-1, polygonOffsetUnits:-1 });
+const pools = [];
+for (let i=0;i<POOL_MAX;i++){
+  const m = new THREE.Mesh(poolGeo, poolMat); m.visible = false; scene.add(m);
+  pools.push({ mesh:m, t:0, target:0, active:false });
+}
+let poolIdx = 0;
+function spawnPool(x, z, size) {
+  if (!gore.pools) return;
+  const p = pools[poolIdx++ % POOL_MAX];
+  p.mesh.position.set(x, .008 + (poolIdx%POOL_MAX)*.0004, z);
+  p.mesh.rotation.y = Math.random()*6.28;
+  p.mesh.scale.setScalar(.01); p.mesh.visible = true;
+  p.t = 0; p.target = size; p.active = true;
+}
+function updatePools(dt) {
+  for (const p of pools) if (p.active) {
+    p.t += dt;
+    const k = 1 - Math.pow(1 - Math.min(1, p.t/6), 3);
+    p.mesh.scale.setScalar(Math.max(.01, p.target*k));
+    if (p.t >= 6) p.active = false;
+  }
+}
+
+function updateParticles(dt) {
+  for (let i=0;i<P_MAX;i++){
+    if (!pOn[i]) continue;
+    const o = i*3;
+    if (pLife[i] > 0) {
+      pLife[i] -= dt;
+      pVel[o+1] -= pGrav[i]*dt;
+      pPos[o] += pVel[o]*dt; pPos[o+1] += pVel[o+1]*dt; pPos[o+2] += pVel[o+2]*dt;
+      if (pPos[o+1] < .02) {
+        if (pKind[i]) {
+          pLife[i] = 0;
+          if (Math.random() < gore.decalChance*.12) spawnDecal(tmpV.set(pPos[o], 0, pPos[o+2]), UP, rand(.08,.26));
+        } else { pPos[o+1] = .02; pVel[o] *= .5; pVel[o+1] *= -.3; pVel[o+2] *= .5; }
+      }
+    }
+    if (pLife[i] > 0) dummy.scale.setScalar(pSize[i]*Math.min(1, pLife[i]*3));
+    else { dummy.scale.set(0,0,0); pOn[i] = 0; }
+    dummy.position.set(pPos[o], pPos[o+1], pPos[o+2]); dummy.quaternion.identity(); dummy.updateMatrix();
+    pMesh.setMatrixAt(i, dummy.matrix);
+  }
+  pMesh.instanceMatrix.needsUpdate = true;
+}
+
+/* =====================================================================
+   ENEMY DUMMIES (built from separate parts so they can be torn apart)
+   ===================================================================== */
+const mats = {
+  shirt: new THREE.MeshStandardMaterial({ color:0x6b5d3f, roughness:.85 }),
+  pants: new THREE.MeshStandardMaterial({ color:0x3b4252, roughness:.9 }),
+  skin:  new THREE.MeshStandardMaterial({ color:0xc9a27e, roughness:.7 }),
+  visor: new THREE.MeshStandardMaterial({ color:0x15171a, roughness:.3 }),
+  flesh: new THREE.MeshStandardMaterial({ color:0x7a0a0a, roughness:.35 }),
+};
+const capsule = (r, len, pivotTop) => { const g = new THREE.CapsuleGeometry(r, len, 4, 10); if (pivotTop) g.translate(0, -(len/2 + r), 0); return g; };
+const PART_DEFS = {
+  torso: { geo:()=>capsule(.19,.42,false), pos:[0,1.2,0],     mat:'shirt', mult:1 },
+  head:  { geo:()=>new THREE.SphereGeometry(.14,14,12), pos:[0,1.74,0], mat:'skin', mult:3, torsoStump:[0,.4,0],    selfStump:[0,-.14,0] },
+  armL:  { geo:()=>capsule(.06,.5,true),  pos:[-.3,1.5,0],    mat:'shirt', mult:.7, torsoStump:[-.3,.3,0],  half:.31 },
+  armR:  { geo:()=>capsule(.06,.5,true),  pos:[ .3,1.5,0],    mat:'shirt', mult:.7, torsoStump:[ .3,.3,0],  half:.31 },
+  legL:  { geo:()=>capsule(.09,.6,true),  pos:[-.12,.82,0],   mat:'pants', mult:.7, torsoStump:[-.12,-.38,0], half:.39 },
+  legR:  { geo:()=>capsule(.09,.6,true),  pos:[ .12,.82,0],   mat:'pants', mult:.7, torsoStump:[ .12,-.38,0], half:.39 },
+};
+const stumpGeo = new THREE.SphereGeometry(.075, 8, 6);
+const woundGeo = new THREE.CircleGeometry(1, 10);
+const woundMat = new THREE.MeshBasicMaterial({ color:0x7a0606, side:THREE.DoubleSide, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2 });
+
+const enemies = [];
+const bodies = [];   // detached limbs and heads
+const aliveCount = () => enemies.filter(e => !e.removed).length;
+
+function spawnEnemy() {
+  if (aliveCount() >= MAX_ENEMIES) {
+    const old = enemies.find(e => !e.removed && e.dead);
+    if (!old) { toast('Too many dummies. Kill some first.'); return; }
+    old.removeAt = 0;
+  }
+  getPlayerPos(P0);
+  let x, z, tries = 0;
+  do { const a = Math.random()*6.283, r = rand(7,15); x = P0.x + Math.cos(a)*r; z = P0.z + Math.sin(a)*r; tries++; }
+  while ((Math.abs(x) > 18 || Math.abs(z) > 18) && tries < 20);
+  tmpV.set(clamp(x,-18,18), 0, clamp(z,-18,18)); collide(tmpV, .5);
+
+  const e = { group:new THREE.Group(), parts:{}, hp:100, dead:false, removed:false, phase:rand(0,6),
+              fall:0, startQ:null, targetQ:null, poolDone:false, removeAt:null, shrink:0, stagger:0, gushes:[] };
+  for (const [name, def] of Object.entries(PART_DEFS)) {
+    const m = new THREE.Mesh(def.geo(), mats[def.mat]);
+    m.position.set(...def.pos); m.castShadow = true;
+    m.userData = { enemy:e, name, mult:def.mult, wounds:0, detached:false };
+    e.group.add(m); e.parts[name] = m;
+  }
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(.2,.05,.05), mats.visor);
+  visor.position.set(0,.02,-.13); e.parts.head.add(visor);
+  e.parts.armL.rotation.x = e.parts.armR.rotation.x = -1.2;
+  e.group.position.copy(tmpV);
+  scene.add(e.group); enemies.push(e);
+}
+
+function enemyTargets() {
+  const a = [];
+  for (const e of enemies) if (!e.removed) for (const k in e.parts) a.push(e.parts[k]);
+  return a;
+}
+
+function addWound(mesh, point, normal) {
+  if (!gore.wounds || mesh.userData.wounds >= 6) return;
+  mesh.userData.wounds++;
+  const w = new THREE.Mesh(woundGeo, woundMat);
+  const lp = mesh.worldToLocal(point.clone());
+  const ln = mesh.worldToLocal(point.clone().add(normal)).sub(lp).normalize();
+  w.position.copy(lp).addScaledVector(ln, .003);
+  w.quaternion.setFromUnitVectors(ZAXIS, ln);
+  const s = rand(.025,.05); w.scale.set(s,s,s);
+  mesh.add(w);
+}
+
+function makeStump(parent, localPos) {
+  const s = new THREE.Mesh(stumpGeo, mats.flesh);
+  s.position.set(...localPos); s.scale.set(1,.55,1);
+  parent.add(s);
+}
+
+function detachPart(e, name, dir, power = 1) {
+  const m = e.parts[name]; if (!m) return;
+  const def = PART_DEFS[name];
+  m.updateWorldMatrix(true, false);
+  const jointW = m.localToWorld(new V3(...(def.selfStump || [0,0,0])));
+  if (e.parts.torso && def.torsoStump) makeStump(e.parts.torso, def.torsoStump);
+  if (e.parts.torso && def.torsoStump && gore.trail) e.gushes.push({ local:new V3(...def.torsoStump), t:2.2, acc:0 });
+  delete e.parts[name];
+  m.userData.enemy = null;
+  scene.attach(m);
+  if (def.half) {
+    m.geometry.translate(0, def.half, 0);
+    m.position.add(tmpV.set(0, -def.half, 0).applyQuaternion(m.quaternion));
+    makeStump(m, [0, def.half, 0]);
+  } else makeStump(m, def.selfStump);
+  bodies.push({
+    mesh:m, half:def.half || 0, r:name==='head' ? .14 : (name.startsWith('leg') ? .09 : .06),
+    vel:new V3(rand(-1,1), rand(2,4), rand(-1,1)).addScaledVector(dir, rand(2,5)*power),
+    ang:new V3(rand(-9,9), rand(-9,9), rand(-9,9)),
+    life:gore.persist, asleep:false, pooled:false, bleed:0,
+  });
+  spawnBlood(jointW, UP, dir, Math.round(gore.particles*.7), 1.1);
+  if (!gore.cartoon) splatter(jointW, 6, 5);
+}
+
+function updateBodies(dt) {
+  for (let k=bodies.length-1;k>=0;k--){
+    const b = bodies[k], m = b.mesh;
+    b.life -= dt;
+    if (b.life <= 0) { m.removeFromParent(); m.geometry.dispose(); bodies.splice(k,1); continue; }
+    if (b.life < 1) m.scale.setScalar(b.life);
+    if (b.asleep) continue;
+    b.vel.y -= 9.8*dt;
+    m.position.addScaledVector(b.vel, dt);
+    m.rotation.x += b.ang.x*dt; m.rotation.y += b.ang.y*dt; m.rotation.z += b.ang.z*dt;
+    if (gore.trail && b.vel.lengthSq() > 1) {
+      b.bleed += dt;
+      if (b.bleed > .05) { b.bleed = 0; spawnParticles(m.position, UP, tmpV2.set(0,0,0), 2, 'blood', .3); }
+    }
+    tmpV.set(0,1,0).applyQuaternion(m.quaternion);
+    const ext = Math.abs(tmpV.y)*b.half + b.r;
+    if (m.position.y - ext < 0) {
+      m.position.y = ext;
+      if (b.vel.y < -1.5) {
+        spawnDecal(tmpV.set(m.position.x, 0, m.position.z), UP, rand(.3,.55));
+        spawnBlood(tmpV2.set(m.position.x, .05, m.position.z), UP, tmpV3.set(0,0,0), 8, .6);
+        b.vel.y *= -.3; b.vel.x *= .6; b.vel.z *= .6; b.ang.multiplyScalar(.6);
+      } else {
+        b.vel.y = 0; b.vel.x *= .85; b.vel.z *= .85; b.ang.multiplyScalar(.75);
+        if (b.vel.lengthSq() < .03) {
+          b.asleep = true;
+          if (b.half) {  // lie the limb flat
+            tmpV.set(0,1,0).applyQuaternion(m.quaternion);
+            tmpV2.set(tmpV.x, 0, tmpV.z);
+            if (tmpV2.lengthSq() < .01) tmpV2.set(1,0,0);
+            tmpV2.normalize();
+            m.quaternion.premultiply(tmpQ.setFromUnitVectors(tmpV, tmpV2));
+            m.position.y = b.r;
+          }
+          if (!b.pooled) { b.pooled = true; spawnPool(m.position.x, m.position.z, rand(.3,.5)); }
+        }
+      }
+    }
+    m.position.x = clamp(m.position.x, -19.6, 19.6); m.position.z = clamp(m.position.z, -19.6, 19.6);
+  }
+}
+
+function killEnemy(e, dir) {
+  e.dead = true; kills++; refreshHud();
+  tmpV2.set(dir.x, 0, dir.z);
+  if (tmpV2.lengthSq() < .01) tmpV2.set(rand(-1,1), 0, rand(-1,1));
+  tmpV2.normalize();
+  e.startQ = e.group.quaternion.clone();
+  e.targetQ = new THREE.Quaternion().setFromAxisAngle(new V3(tmpV2.z, 0, -tmpV2.x), Math.PI/2).multiply(e.startQ);
+  e.fallDir = tmpV2.clone();
+  if (e.parts.armL) e.parts.armL.rotation.x = .25;
+  if (e.parts.armR) e.parts.armR.rotation.x = .25;
+  if (e.parts.legL) e.parts.legL.rotation.x = 0;
+  if (e.parts.legR) e.parts.legR.rotation.x = 0;
+  if (gore.slowmo) slowTimer = .55;
+}
+
+function damageEnemy(mesh, point, normal, dir, dmg) {
+  const e = mesh.userData.enemy, name = mesh.userData.name;
+  const total = dmg * mesh.userData.mult;
+  spawnBlood(point, normal, dir, gore.particles, 1);
+  addWound(mesh, point, normal);
+  // exit spray onto whatever is behind the target
+  if (!gore.cartoon && Math.random() < gore.decalChance) {
+    const h = surfaceHit(point, dir, 7);
+    if (h) spawnDecal(h.point, h.normal, rand(.35,.8));
+  }
+  let wasDead = e.dead, died = false;
+  if (!e.dead) {
+    e.hp -= total; e.stagger = .35;
+    e.group.position.addScaledVector(tmpV2.set(dir.x,0,dir.z).normalize(), .12);
+    if (e.hp <= 0) { killEnemy(e, dir); died = true; }
+  }
+  if (gore.gibs) spawnGibs(point, dir, died ? gore.gibs : Math.ceil(gore.gibs/3));
+  if (gore.cartoon && died) spawnParticles(point, UP, dir, 40, 'cartoon', 1.6, 1.6);
+  if (gore.dismember && name !== 'torso') {
+    const severs = died ? (name === 'head' || Math.random() < .6)
+                 : wasDead ? Math.random() < .5
+                 : (total >= 25 && Math.random() < .2);
+    if (severs) detachPart(e, name, dir, 1);
+  }
+}
+
+function explodeEnemy(e, origin, power) {
+  tmpV.copy(e.group.position).setY(1).sub(origin); tmpV.y += .6;
+  const dir = tmpV.clone().normalize();
+  if (!e.dead) { e.hp = 0; kills++; refreshHud(); e.dead = true; }
+  if (gore.dismember) {
+    for (const name of Object.keys(e.parts)) if (name !== 'torso') detachPart(e, name, dir, power);
+    tmpV2.copy(e.group.position).setY(1);
+    spawnBlood(tmpV2, UP, dir, gore.particles*2, 1.6, 1.2);
+    spawnGibs(tmpV2, dir, gore.gibs*3, power*1.3);
+    splatter(tmpV2, 14, 6);
+    spawnPool(e.group.position.x, e.group.position.z, gore.slowmo ? 1.4 : 1.0);
+    e.removed = true; e.group.removeFromParent();
+  } else {
+    if (!e.startQ) killEnemy(e, dir); else e.dead = true;
+    if (gore.cartoon) spawnParticles(tmpV2.copy(e.group.position).setY(1), UP, dir, 40, 'cartoon', 1.6, 1.6);
+    else spawnBlood(tmpV2.copy(e.group.position).setY(1), UP, dir, gore.particles, 1.2);
+  }
+}
+
+function updateEnemies(dt) {
+  getPlayerPos(P0);
+  for (let k=enemies.length-1;k>=0;k--){
+    const e = enemies[k];
+    if (e.removed) { enemies.splice(k,1); continue; }
+    const g = e.group;
+
+    for (let j=e.gushes.length-1;j>=0;j--){            // bleeding stumps
+      const gs = e.gushes[j]; gs.t -= dt; gs.acc += dt;
+      if (gs.t <= 0 || !e.parts.torso) { e.gushes.splice(j,1); continue; }
+      if (gs.acc > .05) { gs.acc = 0; e.parts.torso.localToWorld(tmpV.copy(gs.local)); spawnParticles(tmpV, UP, tmpV2.set(0,0,0), 3, 'blood', .6); }
+    }
+
+    if (!e.dead) {
+      e.stagger = Math.max(0, e.stagger - dt);
+      const dx = P0.x - g.position.x, dz = P0.z - g.position.z, dist = Math.hypot(dx, dz);
+      g.rotation.y += angDiff(g.rotation.y, Math.atan2(-dx, -dz)) * Math.min(1, dt*5);
+      if (dist > 2.4) {
+        const sp = (e.stagger > 0 ? .2 : .9) * dt;
+        g.position.x += dx/dist*sp; g.position.z += dz/dist*sp;
+        collide(g.position, .45);
+        e.phase += dt*5;
+        if (e.parts.legL) e.parts.legL.rotation.x =  Math.sin(e.phase)*.6;
+        if (e.parts.legR) e.parts.legR.rotation.x = -Math.sin(e.phase)*.6;
+      }
+      if (e.parts.armL) e.parts.armL.rotation.x = -1.2 + Math.sin(e.phase*.7)*.1;
+      if (e.parts.armR) e.parts.armR.rotation.x = -1.2 - Math.sin(e.phase*.7)*.1;
+    } else if (e.targetQ) {
+      if (e.fall < 1) {
+        e.fall = Math.min(1, e.fall + dt/.7);
+        const t = e.fall*e.fall*(3 - 2*e.fall);
+        g.quaternion.copy(e.startQ).slerp(e.targetQ, t);
+        g.position.y = t*.17;
+        if (e.fall >= 1 && !e.poolDone) {
+          e.poolDone = true;
+          g.getWorldPosition(tmpV);
+          spawnPool(tmpV.x + e.fallDir.x*.7, tmpV.z + e.fallDir.z*.7, gore.slowmo ? 1.3 : .9);
+          e.removeAt = simTime + gore.persist;
+        }
+      }
+      if (e.removeAt !== null && simTime >= e.removeAt) {
+        e.shrink += dt;
+        g.scale.setScalar(Math.max(.001, 1 - e.shrink));
+        if (e.shrink >= 1) {
+          g.removeFromParent();
+          g.traverse(o => { if (o.isMesh && o.geometry !== stumpGeo && o.geometry !== woundGeo) o.geometry.dispose(); });
+          e.removed = true;
+        }
+      }
+    }
+  }
+}
+
+/* =====================================================================
+   WEAPON, TRACERS, GRENADES
+   ===================================================================== */
+const gun = new THREE.Group();
+{
+  const metal = new THREE.MeshStandardMaterial({ color:0x24262a, roughness:.4, metalness:.7 });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(.045,.07,.3), metal); body.position.set(0,.01,-.12);
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(.012,.012,.18,8), metal); barrel.rotation.x = Math.PI/2; barrel.position.set(0,.03,-.32);
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(.04,.09,.05), metal); grip.position.set(0,-.05,-.02); grip.rotation.x = .25;
+  gun.add(body, barrel, grip);
+}
+const muzzle = new THREE.Object3D(); muzzle.position.set(0,.03,-.42); gun.add(muzzle);
+const flash = new THREE.Mesh(new THREE.SphereGeometry(.04,8,6), new THREE.MeshBasicMaterial({ color:0xffd27a, blending:THREE.AdditiveBlending, transparent:true }));
+flash.visible = false; muzzle.add(flash);
+let flashT = 0;
+
+const gunPivot = new THREE.Group(); gunPivot.position.set(.28, 1.3, 0);
+rig.add(gunPivot); gunPivot.add(gun); gun.position.set(0,0,-.25);
+
+const tracers = [];
+for (let i=0;i<8;i++){
+  const m = new THREE.Mesh(new THREE.BoxGeometry(.006,.006,1), new THREE.MeshBasicMaterial({ color:0xffe6a0, transparent:true, opacity:.9 }));
+  m.visible = false; m.frustumCulled = false; scene.add(m); tracers.push({ mesh:m, ttl:0 });
+}
+let tIdx = 0;
+function addTracer(a, b) {
+  const t = tracers[tIdx++ % tracers.length];
+  t.mesh.position.copy(a).add(b).multiplyScalar(.5);
+  t.mesh.lookAt(b); t.mesh.scale.z = a.distanceTo(b);
+  t.mesh.visible = true; t.ttl = .06;
+}
+function updateTracers(real) {
+  for (const t of tracers) if (t.ttl > 0) { t.ttl -= real; if (t.ttl <= 0) t.mesh.visible = false; }
+  if (flashT > 0) { flashT -= real; if (flashT <= 0) flash.visible = false; }
+}
+
+function fireFrom(origin, dir, haptic) {
+  if (realTime - lastShot < .11) return;
+  lastShot = realTime;
+  sfx.shot();
+  flash.visible = true; flashT = .05;
+  muzzle.getWorldPosition(tmpV3);
+  const start = tmpV3.clone();
+
+  ray.set(origin, dir); ray.far = 80;
+  const hit = ray.intersectObjects(surfaces.concat(enemyTargets()), false)[0];
+  const end = hit ? hit.point.clone() : origin.clone().addScaledVector(dir, 60);
+  addTracer(start, end);
+  if (haptic) pulse(haptic, .5, 30);
+  if (!hit) return;
+
+  const n = new V3().copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+  if (hit.object.userData.enemy !== undefined && hit.object.userData.name) {
+    damageEnemy(hit.object, hit.point, n, dir.clone(), 34);
+  } else {
+    spawnParticles(hit.point, n, tmpV2.set(0,0,0), 6, 'dust', .6);
+  }
+}
+
+function pulse(input, strength, ms) {
+  try { const a = input.gamepad && input.gamepad.hapticActuators && input.gamepad.hapticActuators[0]; if (a && a.pulse) a.pulse(strength, ms); } catch (e) {}
+}
+
+/* ---- grenades ---- */
+const grenades = [], fxList = [];
+const grenGeo = new THREE.SphereGeometry(.05, 10, 8), grenMat = new THREE.MeshStandardMaterial({ color:0x2e3a26, roughness:.6 });
+function throwGrenade(origin, dir) {
+  if (grenades.length >= 4) return;
+  const m = new THREE.Mesh(grenGeo, grenMat); m.castShadow = true; m.position.copy(origin); scene.add(m);
+  grenades.push({ mesh:m, vel:dir.clone().multiplyScalar(9).add(new V3(0,2.5,0)), fuse:1.7 });
+}
+function updateGrenades(dt) {
+  for (let i=grenades.length-1;i>=0;i--){
+    const g = grenades[i];
+    g.vel.y -= 9.8*dt; g.mesh.position.addScaledVector(g.vel, dt);
+    if (g.mesh.position.y < .05) { g.mesh.position.y = .05; g.vel.y *= -.4; g.vel.x *= .7; g.vel.z *= .7; }
+    if (Math.abs(g.mesh.position.x) > 19.6) { g.mesh.position.x = Math.sign(g.mesh.position.x)*19.6; g.vel.x *= -.5; }
+    if (Math.abs(g.mesh.position.z) > 19.6) { g.mesh.position.z = Math.sign(g.mesh.position.z)*19.6; g.vel.z *= -.5; }
+    g.fuse -= dt;
+    if (g.fuse <= 0) { explode(g.mesh.position.clone()); g.mesh.removeFromParent(); grenades.splice(i,1); }
+  }
+  for (let i=fxList.length-1;i>=0;i--){
+    const f = fxList[i]; f.t += dt;
+    const k = f.t/.3; f.mesh.scale.setScalar(.2 + k*2.2); f.mesh.material.opacity = Math.max(0, 1-k);
+    if (k >= 1) { f.mesh.removeFromParent(); f.mesh.material.dispose(); fxList.splice(i,1); }
+  }
+}
+function explode(pos) {
+  sfx.boom();
+  const fx = new THREE.Mesh(new THREE.SphereGeometry(1,12,8), new THREE.MeshBasicMaterial({ color:0xffa040, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false }));
+  fx.position.copy(pos); scene.add(fx); fxList.push({ mesh:fx, t:0 });
+  spawnParticles(pos, UP, UP, 30, 'fire', 2, 2.2);
+  spawnParticles(pos, UP, UP, 30, 'smoke', 1.2, 1);
+  spawnParticles(pos, UP, UP, 30, 'dust', 2.5, 1.2);
+  const R = 4.5;
+  for (const e of enemies) {
+    if (e.removed) continue;
+    const d = e.group.position.distanceTo(pos);
+    if (d < R) explodeEnemy(e, pos, clamp(1.6*(1 - d/R) + .8, .8, 2.4));
+  }
+  for (const b of bodies) {
+    const d = b.mesh.position.distanceTo(pos);
+    if (d < R) { b.asleep = false; b.vel.add(tmpV.copy(b.mesh.position).sub(pos).setY(.6).normalize().multiplyScalar(7*(1 - d/R) + 2)); }
+  }
+  if (gore.slowmo) slowTimer = .5;
+}
+
+/* =====================================================================
+   SOLDIER (the player’s body)
+   ===================================================================== */
+const soldierRoot = new THREE.Group();    // placed at the player each frame
+const soldierHolder = new THREE.Group();  // holds the normalised model
+soldierRoot.add(soldierHolder); scene.add(soldierRoot);
+let mixer = null, headMeshes = [];
+
+function updateHeadVisibility() {
+  const hide = renderer.xr.isPresenting || !thirdPerson;
+  headMeshes.forEach(m => m.visible = !hide);
+}
+function clearHolder() {
+  while (soldierHolder.children.length) soldierHolder.remove(soldierHolder.children[0]);
+  headMeshes = []; mixer = null;
+}
+function buildPlaceholder() {
+  clearHolder();
+  const m = new THREE.MeshStandardMaterial({ color:0x4a5a3a, roughness:.8 });
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(.22,1.1,4,12), m); body.position.y = .85; body.castShadow = true;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(.14,14,12), new THREE.MeshStandardMaterial({ color:0x2c3326 })); head.position.y = 1.7; head.castShadow = true;
+  soldierHolder.add(body, head); headMeshes = [head]; updateHeadVisibility();
+}
+function installSoldier(gltf) {
+  clearHolder();
+  const model = gltf.scene;
+  soldierHolder.add(model);
+  if (gltf.animations && gltf.animations.length) {
+    mixer = new THREE.AnimationMixer(model);
+    mixer.clipAction(gltf.animations[0]).play();
+    mixer.update(0);
+  }
+  model.traverse(o => {
+    if (o.isMesh) {
+      o.frustumCulled = false;          // skinned bounds are unreliable on this model
+      o.castShadow = true;
+      if (HIDE_IN_FPV.test(o.name)) headMeshes.push(o);
+    }
+  });
+  soldierHolder.updateMatrixWorld(true);
+  const find = re => { let r = null; model.traverse(o => { if (!r && re.test(o.name)) r = o; }); return r; };
+  const head = find(/^CC_Base_Head/), toeL = find(/^CC_Base_L_ToeBase_/), toeR = find(/^CC_Base_R_ToeBase_/);
+  let s = 1, footY = 0;
+  if (head && (toeL || toeR)) {
+    const ys = [toeL, toeR].filter(Boolean).map(b => b.getWorldPosition(new V3()).y);
+    footY = Math.min(...ys);
+    s = HEAD_BONE_HEIGHT / (head.getWorldPosition(new V3()).y - footY);
+  } else {
+    const box = new THREE.Box3().setFromObject(model);
+    s = 1.8 / Math.max(.001, box.max.y - box.min.y); footY = box.min.y;
+  }
+  model.scale.setScalar(s);
+  model.position.y = -footY*s + .03;
+  updateHeadVisibility();
+  setStatus('Soldier loaded.');
+}
+
+const loader = new GLTFLoader();
+function loadSoldier(url) {
+  setStatus('Loading soldier…');
+  loader.load(url, installSoldier,
+    ev => { if (ev.total) setStatus(`Loading soldier… ${Math.round(ev.loaded/ev.total*100)}%`); },
+    () => {
+      setStatus('Couldn’t load the model by URL (browsers block this on file://). Pick the .glb below, or run a local server. A placeholder body is used meanwhile.');
+      $('#filePick').hidden = false;
+      if (!soldierHolder.children.length) buildPlaceholder();
+    });
+}
+function setStatus(t) { $('#modelStatus').textContent = t; }
+$('#fileIn').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const url = URL.createObjectURL(f);
+  loader.load(url, g => { installSoldier(g); URL.revokeObjectURL(url); }, undefined, () => setStatus('That file couldn’t be read as a model.'));
+});
+buildPlaceholder();
+
+function updateSoldier(real) {
+  if (renderer.xr.isPresenting) {
+    camera.getWorldPosition(tmpV); camera.getWorldQuaternion(tmpQ);
+    tmpV2.set(0,0,-1).applyQuaternion(tmpQ); tmpV2.y = 0;
+    if (tmpV2.lengthSq() > 1e-4) {
+      tmpV2.normalize();
+      const target = Math.atan2(-tmpV2.x, -tmpV2.z);
+      bodyYaw += angDiff(bodyYaw, target) * (1 - Math.exp(-6*real));
+    }
+    tmpV3.set(-Math.sin(bodyYaw), 0, -Math.cos(bodyYaw));
+    soldierRoot.position.set(tmpV.x - tmpV3.x*.12, rig.position.y, tmpV.z - tmpV3.z*.12);
+    const want = clamp((tmpV.y - rig.position.y)/1.62, .6, 1.05);
+    bodySquat += (want - bodySquat) * (1 - Math.exp(-8*real));
+  } else {
+    bodyYaw = yaw; bodySquat = 1;
+    soldierRoot.position.copy(rig.position);
+  }
+  soldierRoot.rotation.y = bodyYaw + MODEL_YAW_OFFSET;
+  soldierRoot.scale.set(1, bodySquat, 1);
+  if (mixer) mixer.update(real);
+}
+
+/* =====================================================================
+   INPUT: desktop
+   ===================================================================== */
+function getPlayerPos(out) {
+  if (renderer.xr.isPresenting) { camera.getWorldPosition(out); out.y = 0; } else out.copy(rig.position);
+  return out;
+}
+const active = () => renderer.xr.isPresenting || (started && locked);
+
+function setView(tp) {
+  thirdPerson = tp;
+  if (!renderer.xr.isPresenting) camera.position.set(tp ? .55 : 0, tp ? .12 : 0, tp ? 2.4 : 0);
+  updateHeadVisibility();
+}
+setView(true);
+
+function desktopFire() {
+  camera.getWorldPosition(tmpV); camera.getWorldDirection(tmpV2);
+  fireFrom(tmpV.clone(), tmpV2.clone(), null);
+}
+function desktopGrenade() {
+  muzzle.getWorldPosition(tmpV); camera.getWorldDirection(tmpV2);
+  throwGrenade(tmpV.clone(), tmpV2.clone());
+}
+
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (!active()) return;
+  if (e.code === 'KeyG') desktopGrenade();
+  else if (e.code === 'KeyR') spawnEnemy();
+  else if (e.code === 'KeyC') clearGore();
+  else if (e.code === 'KeyV') setView(!thirdPerson);
+  else if (/^Digit[1-5]$/.test(e.code)) setGore(Number(e.code.slice(5)) - 1);
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('mousedown', e => { if (e.button === 0 && active() && !renderer.xr.isPresenting) mouseDown = true; });
+addEventListener('mouseup', () => { mouseDown = false; });
+addEventListener('mousemove', e => {
+  if (!locked || renderer.xr.isPresenting) return;
+  yaw -= e.movementX*.0022;
+  pitch = clamp(pitch - e.movementY*.0022, thirdPerson ? -.9 : -1.4, thirdPerson ? .35 : 1.4);
+});
+document.addEventListener('pointerlockchange', () => {
+  locked = document.pointerLockElement === renderer.domElement;
+  if (!locked) { mouseDown = false; if (started && !renderer.xr.isPresenting) showMenu(true); }
+});
+
+function inputDesktop(real) {
+  if (renderer.xr.isPresenting) return;
+  rig.rotation.y = yaw; pitchPivot.rotation.x = pitch; gunPivot.rotation.x = pitch;
+  const f = (keys.KeyW?1:0) - (keys.KeyS?1:0), s = (keys.KeyD?1:0) - (keys.KeyA?1:0);
+  if (f || s) {
+    const l = Math.hypot(f,s), sp = (keys.ShiftLeft ? 5.5 : 3.2)*real/l;
+    rig.position.x += (-Math.sin(yaw)*f + Math.cos(yaw)*s)*sp;
+    rig.position.z += (-Math.cos(yaw)*f - Math.sin(yaw)*s)*sp;
+    collide(rig.position);
+  }
+  if (mouseDown) desktopFire();
+}
+
+/* =====================================================================
+   INPUT: VR controllers
+   ===================================================================== */
+const controllers = [renderer.xr.getController(0), renderer.xr.getController(1)];
+const handBlock = () => new THREE.Mesh(new THREE.BoxGeometry(.06,.04,.12), new THREE.MeshStandardMaterial({ color:0x2b2f26, roughness:.8 }));
+
+const wristCanvas = document.createElement('canvas'); wristCanvas.width = 256; wristCanvas.height = 128;
+const wristTex = new THREE.CanvasTexture(wristCanvas);
+const wrist = new THREE.Mesh(new THREE.PlaneGeometry(.14,.07), new THREE.MeshBasicMaterial({ map:wristTex, transparent:true }));
+wrist.position.set(0,.05,.05); wrist.rotation.x = -.9;
+let wristMsg = '', wristMsgT = 0;
+function drawWrist() {
+  const g = wristCanvas.getContext('2d');
+  g.clearRect(0,0,256,128);
+  g.fillStyle = 'rgba(12,14,10,.85)'; g.fillRect(0,0,256,128);
+  g.fillStyle = LEVEL_COLORS[goreIndex]; g.fillRect(0,0,10,128);
+  g.fillStyle = '#ebe8da'; g.font = 'bold 36px sans-serif'; g.fillText(`Gore: ${gore.name}`, 24, 50);
+  g.font = '28px sans-serif'; g.fillStyle = '#a29f8e'; g.fillText(`Kills: ${kills}`, 24, 88);
+  if (wristMsg) { g.fillStyle = '#ffd27a'; g.font = '20px sans-serif'; g.fillText(wristMsg, 24, 118); }
+  wristTex.needsUpdate = true;
+}
+
+controllers.forEach(c => {
+  rig.add(c);
+  c.addEventListener('connected', e => {
+    c.userData.input = e.data; c.userData.prev = [];
+    const hb = handBlock(); hb.name = 'hand'; hb.position.z = .02; c.add(hb);
+    if (e.data.handedness === 'right') { c.add(gun); gun.position.set(0,0,0); gun.rotation.set(-.35,0,0); }
+    if (e.data.handedness === 'left')  { c.add(wrist); drawWrist(); }
+  });
+  c.addEventListener('disconnected', () => {
+    c.userData.input = null;
+    const hb = c.getObjectByName('hand'); if (hb) c.remove(hb);
+    c.remove(wrist);
+  });
+});
+
+function rotateRigAboutHead(a) {
+  camera.getWorldPosition(P0);
+  rig.rotation.y += a; rig.updateMatrixWorld(true);
+  camera.getWorldPosition(tmpV);
+  rig.position.x += P0.x - tmpV.x; rig.position.z += P0.z - tmpV.z;
+}
+
+function inputVR(real) {
+  if (!renderer.xr.isPresenting) return;
+  if (wristMsgT > 0) { wristMsgT -= real; if (wristMsgT <= 0) { wristMsg = ''; drawWrist(); } }
+  for (const c of controllers) {
+    const input = c.userData.input; if (!input || !input.gamepad) continue;
+    const gp = input.gamepad, hand = input.handedness;
+    const cur = gp.buttons.map(b => b.pressed), prev = c.userData.prev || [];
+    const edge = i => cur[i] && !prev[i];
+    const ax = gp.axes.length > 2 ? gp.axes[2] : gp.axes[0], ay = gp.axes.length > 2 ? gp.axes[3] : gp.axes[1];
+
+    if (hand === 'left') {
+      if (Math.abs(ax) > .15 || Math.abs(ay) > .15) {
+        camera.getWorldQuaternion(tmpQ); tmpV.set(0,0,-1).applyQuaternion(tmpQ); tmpV.y = 0; tmpV.normalize();
+        rig.position.x += (tmpV.x*(-ay) + (-tmpV.z)*ax) * 3 * real;
+        rig.position.z += (tmpV.z*(-ay) + ( tmpV.x)*ax) * 3 * real;
+        collide(rig.position, .2);
+      }
+      if (edge(5)) cycleGore();
+      if (edge(4)) spawnEnemy();
+    } else if (hand === 'right') {
+      if (Math.abs(ax) > .7 && !c.userData.snap) { c.userData.snap = true; rotateRigAboutHead((ax > 0 ? -1 : 1)*Math.PI/6); }
+      else if (Math.abs(ax) < .3) c.userData.snap = false;
+      if (cur[0]) {
+        muzzle.getWorldPosition(tmpV); tmpQ.identity(); c.getWorldQuaternion(tmpQ);
+        tmpV2.set(0,0,-1).applyQuaternion(tmpQ).applyAxisAngle(tmpV3.set(1,0,0).applyQuaternion(tmpQ), -.35).normalize();
+        fireFrom(tmpV.clone(), tmpV2.clone(), input);
+      }
+      if (edge(1)) {
+        muzzle.getWorldPosition(tmpV); c.getWorldQuaternion(tmpQ);
+        tmpV2.set(0,0,-1).applyQuaternion(tmpQ);
+        throwGrenade(tmpV.clone(), tmpV2.clone());
+      }
+      if (edge(4)) spawnEnemy();
+      if (edge(5)) clearGore();
+    }
+    c.userData.prev = cur;
+  }
+}
+
+/* =====================================================================
+   XR SESSION
+   ===================================================================== */
+renderer.xr.addEventListener('sessionstart', () => {
+  initAudio();
+  rig.add(camera); camera.position.set(0,0,0); camera.rotation.set(0,0,0);
+  yaw = rig.rotation.y; hideMenu(); updateHeadVisibility(); drawWrist();
+});
+renderer.xr.addEventListener('sessionend', () => {
+  pitchPivot.add(camera); setView(thirdPerson);
+  gunPivot.add(gun); gun.position.set(0,0,-.25); gun.rotation.set(0,0,0);
+  yaw = rig.rotation.y; pitch = 0; started = false; showMenu(false);
+});
+
+/* =====================================================================
+   GORE SETTINGS, HUD, MENU
+   ===================================================================== */
+let toastTimer = 0;
+function toast(t) {
+  const el = $('#toast'); el.textContent = t; el.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+  if (renderer.xr.isPresenting) { wristMsg = t.slice(0, 26); wristMsgT = 2.5; drawWrist(); }
+}
+function saveSettings() { try { localStorage.setItem('yard-settings', JSON.stringify({ gore:goreIndex, adult:adultOk })); } catch (e) {} }
+
+function setGore(i) {
+  if (i < 0 || i >= GORE_LEVELS.length) return false;
+  if (i >= 3 && !adultOk) { toast('Confirm you’re 18 or older in the menu to unlock this level.'); return false; }
+  goreIndex = i; gore = GORE_LEVELS[i];
+  hideDecalsAbove(gore.maxDecals); decalIdx = 0;
+  saveSettings(); refreshMenu(); refreshHud(); drawWrist();
+  toast(`Gore: ${gore.name}`);
+  return true;
+}
+function cycleGore() {
+  let n = (goreIndex + 1) % GORE_LEVELS.length;
+  if (n >= 3 && !adultOk) n = 0;
+  setGore(n);
+}
+function clearGore() {
+  dummy.scale.set(0,0,0); dummy.updateMatrix();
+  for (let i=0;i<MAX_DECALS;i++) decalMesh.setMatrixAt(i, dummy.matrix);
+  decalMesh.instanceMatrix.needsUpdate = true; decalIdx = 0;
+  for (let i=0;i<GIB_MAX;i++) { gibData[i] = null; gibMesh.setMatrixAt(i, dummy.matrix); }
+  gibMesh.instanceMatrix.needsUpdate = true;
+  for (const p of pools) { p.active = false; p.mesh.visible = false; }
+  for (const b of bodies) { b.mesh.removeFromParent(); b.mesh.geometry.dispose(); }
+  bodies.length = 0;
+  for (const e of enemies) if (e.dead && !e.removed) { e.group.removeFromParent(); e.removed = true; }
+  toast('Cleaned up');
+}
+
+const levelsEl = $('#levels');
+GORE_LEVELS.forEach((l, i) => {
+  const b = document.createElement('button'); b.textContent = l.name; b.onclick = () => setGore(i); levelsEl.appendChild(b);
+});
+$('#adultChk').checked = adultOk;
+$('#adultChk').addEventListener('change', e => {
+  adultOk = e.target.checked;
+  if (!adultOk && goreIndex >= 3) setGore(2); else { saveSettings(); refreshMenu(); }
+});
+function refreshMenu() {
+  [...levelsEl.children].forEach((b, i) => {
+    b.classList.toggle('on', i === goreIndex);
+    b.style.background = i === goreIndex ? LEVEL_COLORS[i] : '';
+    b.disabled = i >= 3 && !adultOk;
+  });
+  $('#levelDesc').textContent = gore.blurb;
+}
+function refreshHud() {
+  $('#hud').innerHTML = `Gore: <b>${gore.name}</b> (${goreIndex+1}/5)<br>Kills: <b>${kills}</b>`;
+}
+function showMenu(resume) { $('#menu').classList.remove('hidden'); $('#cross').style.display = 'none'; $('#playBtn').textContent = resume ? 'Resume' : 'Play on desktop'; }
+function hideMenu() { $('#menu').classList.add('hidden'); $('#cross').style.display = renderer.xr.isPresenting ? 'none' : ''; }
+
+$('#playBtn').addEventListener('click', () => {
+  initAudio(); started = true; hideMenu();
+  renderer.domElement.requestPointerLock();
+});
+$('#vrSlot').appendChild(VRButton.createButton(renderer));
+$('#cross').style.display = 'none';
+
+refreshMenu(); refreshHud();
+
+/* =====================================================================
+   MAIN LOOP
+   ===================================================================== */
+for (let i=0;i<4;i++) spawnEnemy();
+loadSoldier(MODEL_URL);
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const real = Math.min(clock.getDelta(), .05);
+  realTime += real;
+  if (slowTimer > 0) { slowTimer -= real; timeScale = .25; } else timeScale = Math.min(1, timeScale + real*3);
+  const dt = real*timeScale;
+
+  const live = active();
+  if (live) {
+    simTime += dt;
+    inputDesktop(real); inputVR(real);
+    updateEnemies(dt); updateBodies(dt); updateGibs(dt); updateParticles(dt);
+    updatePools(dt); updateGrenades(dt);
+  }
+  updateSoldier(real);
+  updateTracers(real);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
